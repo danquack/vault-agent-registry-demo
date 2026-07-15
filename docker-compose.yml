@@ -1,0 +1,147 @@
+services:
+  zitadel-db:
+    image: postgres:16-alpine
+    container_name: zitadel-db
+    environment:
+      POSTGRES_DB: zitadel
+      POSTGRES_USER: zitadel
+      POSTGRES_PASSWORD: zitadel-demo-pw
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d zitadel -U zitadel"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  zitadel:
+    image: ghcr.io/zitadel/zitadel:v4.16.0
+    container_name: zitadel
+    user: "0"
+    # start-from-init also runs schema migrations, so no separate
+    # migration step is needed the way Authentik needed a worker.
+    command: start-from-init --masterkey "ZitadelDemoMasterkey1234567890AB"
+    depends_on:
+      zitadel-db:
+        condition: service_healthy
+    environment:
+      ZITADEL_PORT: 8080
+      ZITADEL_EXTERNALDOMAIN: zitadel
+      ZITADEL_EXTERNALPORT: 8080
+      ZITADEL_EXTERNALSECURE: "false"
+      ZITADEL_TLS_ENABLED: "false"
+      ZITADEL_DATABASE_POSTGRES_DSN: postgresql://zitadel:zitadel-demo-pw@zitadel-db:5432/zitadel?sslmode=disable
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: "false"
+      # Lets Terraform authenticate to the ZITADEL API without a manual
+      # first-run setup wizard click-through -- same purpose as
+      # AUTHENTIK_BOOTSTRAP_TOKEN before it, just provisioned as a real
+      # admin machine user + PAT rather than a fixed token string.
+      ZITADEL_FIRSTINSTANCE_PATPATH: /zitadel-bootstrap/admin.pat
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: terraform-admin
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: Automatically Initialized Terraform Admin
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: "2099-01-01T00:00:00Z"
+    healthcheck:
+      test: ["CMD", "/app/zitadel", "ready"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 15s
+    ports:
+      - "8080:8080"
+    volumes:
+      - zitadel-bootstrap:/zitadel-bootstrap:rw
+
+  vault:
+    image: hashicorp/vault-enterprise:latest
+    container_name: vault-server
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "root"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      VAULT_LICENSE: "${VAULT_LICENSE}"
+      VAULT_LOG_LEVEL: "info"
+      VAULT_ADDR: "http://127.0.0.1:8200"
+    ports:
+      - "8200:8200"
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  terraform:
+    image: hashicorp/terraform:1.15
+    container_name: terraform-provisioner
+    depends_on:
+      vault:
+        condition: service_healthy
+      zitadel:
+        condition: service_healthy
+    working_dir: /workspace
+    volumes:
+      - ./terraform:/workspace
+      - zitadel-bootstrap:/zitadel-bootstrap:ro
+      - agent-credentials:/agent-credentials:rw
+    # ZITADEL's healthcheck can pass a moment before the admin PAT file
+    # is actually flushed to the shared volume, so the first apply can
+    # race and fail to read it -- retry a few times rather than making
+    # that timing quirk the user's problem.
+    entrypoint:
+      - "sh"
+      - "-c"
+      - |
+        terraform init
+        for i in 1 2 3 4 5 6; do
+          terraform apply -auto-approve && exit 0
+          echo "apply failed, retrying in 10s ($$i/6)..."
+          sleep 10
+        done
+        exit 1
+
+  demo-ceiling:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    container_name: demo-ceiling
+    depends_on:
+      vault:
+        condition: service_healthy
+      zitadel:
+        condition: service_healthy
+      terraform:
+        condition: service_completed_successfully
+    environment:
+      VAULT_ADDR: "http://vault:8200"
+      ZITADEL_URL: "http://zitadel:8080"
+    # Lets the script's diagnostics shell out to `docker logs vault-server`
+    # from inside this container -- full access to the host's Docker
+    # daemon, fine for a local demo, not something to do in production.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - agent-credentials:/agent-credentials:ro
+    entrypoint: ["python3", "/scripts/demo_ceiling.py"]
+    profiles: ["ceiling", "both"]
+
+  demo-rar:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    container_name: demo-rar
+    depends_on:
+      vault:
+        condition: service_healthy
+      zitadel:
+        condition: service_healthy
+      terraform:
+        condition: service_completed_successfully
+    environment:
+      VAULT_ADDR: "http://vault:8200"
+      ZITADEL_URL: "http://zitadel:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - agent-credentials:/agent-credentials:ro
+    entrypoint: ["python3", "/scripts/demo_rar.py"]
+    profiles: ["rar", "both"]
+
+volumes:
+  zitadel-bootstrap:
+  agent-credentials:

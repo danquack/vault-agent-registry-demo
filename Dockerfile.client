@@ -1,0 +1,10 @@
+# The demo scripts shell out to `docker logs vault-server` for diagnostics
+# (see scripts/lib.py) -- pull just the CLI binary from the official image
+# rather than installing a full Docker Engine.
+FROM docker:27-cli AS dockercli
+
+FROM python:3.12-slim
+RUN pip install --no-cache-dir requests
+COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
+COPY scripts/ /scripts/
+WORKDIR /scripts
