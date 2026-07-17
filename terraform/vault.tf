@@ -332,6 +332,32 @@ resource "vault_generic_endpoint" "register_rar_agent" {
   })
 }
 
+# The stand-in subject is also registered as an agent in its own right --
+# an ad-hoc diagnostic for the on-behalf-of investigation (does registering
+# the subject itself change anything about OBO resolution?). Self-owned
+# since it isn't delegating to another identity.
+resource "vault_generic_endpoint" "register_delegated_subject" {
+  depends_on = [
+    vault_generic_endpoint.oauth_rs_profile,
+    vault_identity_entity.delegated_subject,
+    vault_policy.staging_ceiling,
+  ]
+
+  path                 = "agent-registry/register"
+  disable_read         = true
+  disable_delete       = true
+  ignore_absent_fields = true
+
+  data_json = jsonencode({
+    display_name                   = "delegated-subject-test"
+    entity_id                      = vault_identity_entity.delegated_subject.id
+    ceiling_policies               = ["agent-staging-ceiling"]
+    description                    = "Ad-hoc registration for the OBO demo's stand-in subject, to test whether registering the subject itself as an agent affects on-behalf-of resolution."
+    optional_authorization_details = true # no RAR required
+    owner                          = vault_identity_entity.delegated_subject.id
+  })
+}
+
 # --- Outputs ---
 
 output "ceiling_agent_entity_id" {
